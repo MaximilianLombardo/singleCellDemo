@@ -1,0 +1,279 @@
+---
+title: "Single Cell Data Integration Demo"
+author: "Maximilian Lombardo"
+date: "8/15/2020"
+output: html_document
+params:
+  raw.data.parent.dir: "~/locationOnYourMachine/"
+  sample.size: 1000
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Load Necessary libraries
+
+```{r}
+library(Seurat)
+```
+
+Load our Seurat objects corresponding to different datasets
+
+```{r}
+
+objOne <- readRDS("~/Documents/ObjectOnelocation.rds")
+objTwo <- readRDS("~/Documents/ObjectTwolocation.rds")
+objThree <- readRDS("~/Documents/ObjectThreelocation.rds")
+
+#Add dataset as metadata
+
+objOne[["dataset"]] <- rep("objOne", length(Cells(objOne)))
+objTwo[["dataset"]] <- rep("objTwo", length(Cells(objTwo)))
+objThree[["dataset"]] <- rep("objThree", length(Cells(objThree)))
+
+```
+
+Merge datasets and perform a standard clustering of the 3 different datasets
+
+```{r}
+
+obj <- merge(objOne, c(objTwo, objThree))
+
+#Use sctransform in place of Normalize, Find Var features, and Scale
+
+# run sctransform
+obj <- SCTransform(obj,
+                   vars.to.regress = "percent.mito",
+                   verbose = FALSE)
+
+# These are now standard steps in the Seurat workflow for visualization and clustering
+obj <- RunPCA(obj, verbose = FALSE)
+
+ndims <- 1:25
+
+obj <- RunUMAP(obj, dims = ndims, verbose = FALSE)
+obj <- RunTSNE(obj, dims = ndims,
+               perplexity = 30, max_iter = 2000,
+               theta = 0)
+
+
+saveRDS(obj, "~/Documents/allNoIntegration.rds")
+```
+
+
+SCTransform based Integration
+
+Set globals option
+
+```{r}
+options(future.globals.maxSize = 4000 * 1024^2)
+
+```
+
+First, setup the Seurat object list, and run SCTransform on each object separately:
+```{r}
+
+#Make a list of Seurat objects
+obj.list <- list(objOne, objTwo, objThree)
+
+#Perform SCTransform on each object individually
+for (i in 1:length(obj.list)) {
+    obj.list[[i]] <- SCTransform(obj.list[[i]], verbose = FALSE)
+}
+
+```
+
+Next, select features for downstream integration, and run PrepSCTIntegration, which ensures 
+that all necessary Pearson residuals have been calculated.
+
+```{r}
+
+obj.features <- SelectIntegrationFeatures(object.list = obj.list,
+                                          nfeatures = 3000)
+obj.list <- PrepSCTIntegration(object.list = obj.list,
+                               anchor.features = obj.features, 
+                               verbose = FALSE)
+
+```
+
+Next, identify anchors and integrate the datasets. Commands are identical to the standard workflow, but make sure to set normalization.method = 'SCT':
+
+```{r}
+obj.anchors <- FindIntegrationAnchors(object.list = obj.list,
+                                      normalization.method = "SCT",
+                                      anchor.features = obj.features,
+                                      verbose = FALSE)
+obj.integrated <- IntegrateData(anchorset = obj.anchors,
+                                normalization.method = "SCT",
+                                verbose = FALSE)
+```
+
+Now proceed with downstream analysis (i.e. visualization, clustering) on the integrated dataset. Commands are identical to the standard workflow, but do not run the ScaleData function after integration. You can see that after integration, cells group by their biological cell type (which has been pre-annotated), instead of by their underlying technology.
+
+```{r}
+
+obj.integrated <- RunPCA(obj.integrated, verbose = FALSE)
+ndims <- 1:20
+obj.integrated <- RunUMAP(obj.integrated, dims = ndims)
+obj.integrated <- RunTSNE(obj.integrated, dims = ndims)
+
+```
+
+```{r}
+DefaultAssay(obj.integrated) <- 'integrated'
+
+obj.integrated <- FindNeighbors(obj.integrated, dims = ndims, k.param = 10)
+obj.integrated <- FindClusters(obj.integrated, resolution = 1.0)
+
+DefaultAssay(obj.integrated) <- 'SCT'
+
+
+saveRDS(obj.integrated, "~/Documents/objSCTransform.rds")
+
+```
+
+Plot Cluster Composition
+
+```{r}
+library(ggplot2)
+ggplot(obj.integrated@meta.data, aes(x=seurat_clusters, fill=dataset)) + geom_bar(position = 'fill') + ggtitle(label = 'Cluster Composition')
+
+
+```
+
+Clusters 10 and 12 seem to be solely composed of cells from the objOne dataset
+Let's see if we can find markers which help us confirm that these cells make up a distinct cell type.
+
+```{r}
+
+cluster.markers <- FindMarkers(obj.integrated, ident.1 = c(10, 12))
+
+```
+
+
+Find Correlated Features
+
+```{r}
+
+library(ggplot2)
+
+findCorrelatedFeatures <- function(gene = '', obj){
+  exp.mat <- as.matrix(obj[['SCT']]@data)
+  gene.exp <- as.numeric(exp.mat[gene,])
+  correlations<-apply(exp.mat,
+                      1,
+                      function(x){cor(gene.exp,x)})
+  return(rev(sort(correlations)))
+}
+
+correlated.features <- findCorrelatedFeatures(gene = 'gene.name',
+                                              obj = obj.integrated)
+
+
+```
+
+
+Using different approach to integrate our datasets
+
+
+LIGER
+
+
+```{r}
+library(liger)
+library(SeuratWrappers)
+
+#Create combined atlas object
+liger.integration <- merge(objOne, c(objThree, objTwo))
+
+liger.integration <- NormalizeData(liger.integration)
+liger.integration <- FindVariableFeatures(liger.integration)
+liger.integration <- ScaleData(liger.integration, split.by = "dataset", do.center = FALSE)
+liger.integration <- RunOptimizeALS(liger.integration, k = 20, lambda = 5, split.by = "dataset")
+liger.integration <- RunQuantileNorm(liger.integration, split.by = "dataset")
+# You can optionally perform Louvain clustering (`FindNeighbors` and `FindClusters`) after
+# `RunQuantileNorm` according to your needs
+liger.integration <- FindNeighbors(liger.integration, reduction = "iNMF", dims = 1:20)
+liger.integration <- FindClusters(liger.integration, resolution = 0.4)
+# Dimensional reduction and plotting
+liger.integration <- RunUMAP(liger.integration, dims = 1:ncol(liger.integration[["iNMF"]]), reduction = "iNMF")
+DimPlot(liger.integration, group.by = c("dataset", "ident"), ncol = 3)
+
+
+saveRDS(liger.integration, "~/Documents/objLiger.rds")
+```
+
+
+Data integration using Harmony
+
+```{r}
+
+library(harmony)
+
+harmony.integration <- merge(objOne, c(objThree, objTwo))
+
+
+harmony.integration <- NormalizeData(harmony.integration)
+harmony.integration <- FindVariableFeatures(harmony.integration)
+harmony.integration <- ScaleData(harmony.integration)
+harmony.integration <- RunPCA(harmony.integration, verbose = FALSE)
+harmony.integration <- RunHarmony(harmony.integration, group.by.vars = "dataset")
+harmony.integration <- RunUMAP(harmony.integration, reduction = "harmony", dims = 1:30)
+harmony.integration <- FindNeighbors(harmony.integration, reduction = "harmony", dims = 1:30)
+harmony.integration <- FindClusters(harmony.integration)
+DimPlot(harmony.integration, group.by = c("dataset", "ident"), ncol = 2)
+
+saveRDS(harmony.integration, "~/Documents/objHarmony.rds")
+
+```
+
+
+Evaluating the data integration via: Mixing Metrix and Local Structure
+
+```{r}
+
+#Calculate Mixing Metric
+sctransform.mixing <- MixingMetric(obj.integrated,
+                                   grouping.var = 'dataset',
+                                   reduction = 'pca')
+#Add mixing metric to the object metadata
+obj.integrated[["mixing.metric"]]  <- sctransform.mixing
+#plot with Violin plot
+VlnPlot(obj.integrated, "mixing.metric", pt.size = 0.1) + NoLegend() + ggtitle(label = 'SCTransform Integration: Mixing Metric')
+
+#Liger
+liger.mixing <- MixingMetric(liger.integration,
+                             grouping.var = 'dataset',
+                             reduction = 'iNMF')
+liger.integration[['mixing.metric']] <- liger.mixing
+VlnPlot(liger.integration, "mixing.metric", pt.size = 0.1) + NoLegend() + ggtitle(label = 'Liger Integration: Mixing Metric')
+
+#Harmony
+harmony.mixing <- MixingMetric(harmony.integration,
+                               grouping.var = 'dataset',
+                               reduction = 'harmony')
+harmony.integration[['mixing.metric']] <- harmony.mixing
+VlnPlot(harmony.integration, "mixing.metric", pt.size = 0.1) + NoLegend() + ggtitle(label = 'Harmony Integration: Mixing Metric')
+
+#Local Structure
+sctransform.LocalStruct <- LocalStruct(obj.integrated,
+                                       grouping.var = 'dataset',
+                                       reduction = 'pca')
+liger.LocalStruct <- LocalStruct(liger.integration,
+                                 grouping.var = 'dataset',
+                                 reduction = 'iNMF')
+harmony.LocalStruct <- LocalStruct(harmony.integration,
+                                   grouping.var = 'dataset',
+                                   reduction = 'harmony')
+
+
+
+obj.integrated[["mixing.metric"]]  <- MixingMetric(obj.integrated,
+                                   grouping.var = 'dataset',
+                                   reduction = 'pca')
+RidgePlot(obj.integrated,
+          features = c("mixing.metric"),
+          group.by = 'seurat_clusters') + NoLegend()
+
+```

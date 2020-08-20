@@ -1,0 +1,201 @@
+---
+title: "ExampleClustering"
+author: "Maximilian Lombardo"
+date: "8/15/2020"
+output: html_document
+params:
+  raw.data.parent.dir: ""
+  sample.size: 1000
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Load Necessary libraries
+
+```{r}
+library(Seurat)
+```
+
+Read in raw data and generate Seurat object
+
+```{r}
+
+raw.dirs <- list.dirs(params$raw.data.parent.dir, recursive = FALSE)
+
+#Read in counts - we have multiple runs/batchs so we will need to comnbine these
+#in a later step
+counts.1 <- Read10X(raw.dirs[1])
+counts.2 <- Read10X(raw.dirs[2])
+counts.3 <- Read10X(raw.dirs[3])
+counts.4 <- Read10X(raw.dirs[4])
+
+#Sampling Cells from each count matrix for demonstration purposes
+sampleCells <- function(raw.counts){
+  sampled.counts <- raw.counts[, sample(x = colnames(raw.counts),
+                                    size = params$sample.size,
+                                    replace = FALSE)]
+  return(sampled.counts)
+}
+
+#Sampling counts for this demo - some of these datasets are quite large
+sampled.counts.1 <- sampleCells(counts.1)
+sampled.counts.2 <- sampleCells(counts.2)
+sampled.counts.3 <- sampleCells(counts.3)
+sampled.counts.4 <- sampleCells(counts.4)
+
+
+#Generate Seurat objects for individual runs
+obj.1 <- CreateSeuratObject(sampled.counts.1, project = "Batch 1")
+obj.2 <- CreateSeuratObject(sampled.counts.2, project = "Batch 2")
+obj.3 <- CreateSeuratObject(sampled.counts.3, project = "Batch 3")
+obj.4 <- CreateSeuratObject(sampled.counts.4, project = "Batch 4")
+
+#Combine Seurat objects 
+obj <- merge(obj.1, c(obj.2, obj.3, obj.4))
+
+#Remove the original count matrices to free up some memory
+#rm(counts.1, counts.2,
+#   counts.3, counts.2)
+
+
+```
+
+Quality Control
+
+```{r}
+#Add mitochondrial fraction as a metadata item
+obj[['percent.mito']] <- PercentageFeatureSet(obj, pattern = "^mt-")
+
+#Visualize QC feature distributions
+VlnPlot(obj,
+        features = c("nFeature_RNA", "nCount_RNA", "percent.mito"),
+        ncol = 3, pt.size = 0.1)
+```
+Subset cells with low mitohcondrial fraction
+
+```{r}
+obj <- subset(obj, percent.mito < 10)
+
+```
+
+
+Standard Normalization, Variable Feature Selection, and Scaling
+
+```{r}
+obj <- NormalizeData(obj)
+obj <- FindVariableFeatures(obj)
+obj <- ScaleData(obj, features = rownames(obj[["RNA"]]@data))
+
+```
+
+Linear Dimensional reduction
+
+```{r}
+obj <- RunPCA(obj, features = VariableFeatures(object = obj))
+
+
+#Visualize contributions of PCs
+ElbowPlot(obj, ndims = 50)
+
+
+#set number of dimensions for
+#downstream clustering and visualization
+ndims <- 1:20
+```
+
+
+Visualization
+
+```{r}
+obj <- RunUMAP(obj, dims = ndims,
+               n.neighbors = 10,
+               local.connectivity = 10)
+
+obj <- RunTSNE(obj, dims = ndims, perplexity = 30, max_iter = 2000, theta = 0)
+```
+
+View our Data in 2d
+
+```{r}
+TSNEPlot(obj)
+UMAPPlot(obj)
+```
+
+Find Clusters and corresponding markers
+
+```{r}
+obj <- FindNeighbors(obj, dims = ndims, k.param = 10)
+
+obj <- FindClusters(obj, resolution = 0.8)
+
+obj@misc$markers <- FindAllMarkers(obj, min.pct = 0.5)
+
+```
+
+Save atlas Object
+
+```{r}
+#Need to chage for your machine
+saveRDS(obj, "~/Documents/DemoLocation/objectName.rds")
+```
+
+
+Subset the object without the 4th batch and filter out the cells with
+a high mitochondrial fraction
+
+```{r}
+healthy.cells <- rownames(obj@meta.data[!obj@meta.data$orig.ident %in% 'Batch 4',])
+
+obj.sub <- subset(obj, cells = healthy.cells)
+
+#This is pretty stringent, but we only want the high quality data
+obj.sub <- subset(obj.sub, percent.mito < 10)
+
+```
+
+Standard Normalization, Variable Feature Selection, and Scaling on the 
+object subset
+
+```{r}
+obj.sub <- NormalizeData(obj.sub)
+obj.sub <- FindVariableFeatures(obj.sub)
+obj.sub <- ScaleData(obj.sub, features = rownames(obj.sub[["RNA"]]@data))
+```
+
+Visualization
+
+```{r}
+obj.sub <- RunUMAP(obj.sub, dims = ndims,
+               n.neighbors = 10,
+               local.connectivity = 10)
+
+obj.sub <- RunTSNE(obj.sub, dims = ndims,
+                   perplexity = 30,
+                   max_iter = 2000, theta = 0)
+```
+
+View our object in 2d
+
+```{r}
+TSNEPlot(obj.sub, group.by = 'orig.ident')
+UMAPPlot(obj.sub, group.by = 'orig.ident')
+```
+
+Find Clusters and corresponding markers
+
+```{r}
+obj.sub <- FindNeighbors(obj.sub, dims = ndims, k.param = 10)
+
+obj.sub <- FindClusters(obj.sub, resolution = 0.8)
+
+obj.sub@misc$markers <- FindAllMarkers(obj.sub, min.pct = 0.5)
+
+```
+
+Save the subsetted data
+
+```{r}
+saveRDS(obj.sub, "~/Documents/DemoLocation/objectNameSubset.rds")
+```
